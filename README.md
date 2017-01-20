@@ -1,4 +1,4 @@
-# visibleAsync.js
+# visibleasync.js
 
 This is a very simple module to enhance the wonderful [async module](https://caolan.github.io/async/), by Caolan McMahon.
 
@@ -7,7 +7,7 @@ It will invoke a function of your choosing when the callback function of most fu
 ## Quick Examples
 ```javascript
 const debug = require('debug')('myScript');
-const async = require('visibleAsync')(debug);
+const async = require('visibleasync')(debug);
 
 async.map([1, 2, 3], (item, cb) => cb(null, item ** 2), (err, results) => {
   console.log('normal callback');
