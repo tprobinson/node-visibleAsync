@@ -1,6 +1,6 @@
 # visibleAsync.js
 
-This is a very simple module to enhance the wonderful (async module)[https://caolan.github.io/async/], by Caolan McMahon.
+This is a very simple module to enhance the wonderful [async module](https://caolan.github.io/async/), by Caolan McMahon.
 
 It will invoke a function of your choosing when the callback function of most functions in the async library have been called. Supply the function when you require this module.
 
