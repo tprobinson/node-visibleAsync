@@ -1,0 +1,11 @@
+{
+  "name": "visibleAsync",
+  "repo": "tprobinson/async",
+  "description": "Monkey-patch to include logging on most async library functions",
+  "version": "0.0.1",
+  "keywords": ["async", "logging", "dirty"],
+  "dependencies": {},
+  "development": {},
+  "main": "lib/visibleAsync.js",
+  "scripts": [ "lib/visibleAsync.js" ]
+}
