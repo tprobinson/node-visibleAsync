@@ -1,5 +1,5 @@
 {
-    "name": "visibleAsync",
+    "name": "visibleasync",
     "description": "Monkey-patch to include logging on most async library functions",
     "main": "./lib/visibleAsync",
     "author": "Trevor Robinson",

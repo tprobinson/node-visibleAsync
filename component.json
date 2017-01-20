@@ -1,5 +1,5 @@
 {
-  "name": "visibleAsync",
+  "name": "visibleasync",
   "repo": "tprobinson/async",
   "description": "Monkey-patch to include logging on most async library functions",
   "version": "0.0.1",
