@@ -1,33 +1,31 @@
 {
-    "name": "visibleasync",
-    "description": "Monkey-patch to include logging on most async library functions",
-    "main": "./lib/visibleAsync",
-    "author": "Trevor Robinson",
-    "version": "0.0.1",
-    "repository" : {
-        "type" : "git",
-        "url" : "https://github.com/tprobinson/node-visibleAsync.git"
-    },
-    "bugs" : {
-        "url" : "https://github.com/tprobinson/node-visibleAsync/issues"
-    },
-    "licenses" : [
-        {
-            "type" : "MIT",
-            "url" : "https://github.com/tprobinson/node-visibleAsync/raw/master/LICENSE"
-        }
-    ],
-    "devDependencies": {
-        "nodeunit": ">0.0.0",
-        "uglify-js": "1.2.x",
-        "nodelint": ">0.0.0"
-    },
-    "jam": {
-        "main": "lib/visibleAsync.js",
-        "include": [
-            "lib/visibleAsync.js",
-            "README.md",
-            "LICENSE"
-        ]
+  "name": "visibleasync",
+  "description": "Monkey-patch to include logging on most async library functions",
+  "main": "./lib/visibleAsync",
+  "author": "Trevor Robinson",
+  "version": "0.0.2",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tprobinson/node-visibleAsync.git"
+  },
+  "bugs": {
+    "url": "https://github.com/tprobinson/node-visibleAsync/issues"
+  },
+  "licenses": [
+    {
+      "type": "MIT",
+      "url": "https://github.com/tprobinson/node-visibleAsync/raw/master/LICENSE"
     }
+  ],
+  "jam": {
+    "main": "lib/visibleAsync.js",
+    "include": [
+      "lib/visibleAsync.js",
+      "README.md",
+      "LICENSE"
+    ]
+  },
+  "dependencies": {
+    "async": "^2.1.4"
+  }
 }
