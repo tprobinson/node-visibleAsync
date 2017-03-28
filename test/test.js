@@ -1,535 +1,350 @@
-/* global describe:false, afterEach:false step:false */
+/* global describe:false */
 const assert = require('chai').assert;
-const SimpleDockerode = require('../lib/index.js');
-const Stream = require('stream');
-const StreamBattery = require('streambattery');
+const visibleasync = require('../lib/index.js');
+
+const functionConfigs = require('../lib/functionConfigs.js');
+const functionSignatures = require('../lib/functionSignatures.js');
 /* eslint-disable max-nested-callbacks */
 
+let async;
+
 const nonce = 'test';
-const rand = 100;
+function getRand(max = 100) {
+  return Math.floor(Math.random() * max);
+}
+
 function getTestString() {
-  return nonce + Math.floor(Math.random() * rand);
+  return nonce + getRand();
 }
 
-function hasFailed(it) {
-  let failed = false;
-  let tests = it.test.parent.tests;
-  for(let i = 0, limit = tests.length; !failed && i < limit; ++i) {
-    failed = tests[i].state === 'failed';
-  }
-  return failed;
+let logBuffer = [];
+function logFunction(...logs) {
+  logBuffer.push(logs);
 }
 
-function checkResults(results) {
-  assert.property(results, 'inspect', 'inspection results are available');
-  assert.property(results.inspect, 'ExitCode', 'inspection results contain an exit code');
-  assert.isNotNull(results.inspect.ExitCode, 'the exec has ended before presenting results');
-  assert.equal(results.inspect.ExitCode, 0, 'exec exit code is 0');
-
-  if( 'tries' in results.inspect ) {
-    // This means that the workaround had to be engaged, and I want to be warned about that.
-    console.warn('This process did not return immediately, causing ' + results.inspect.tries + ' extra inspect calls.');
-  }
+function getLogs() {
+  const logs = logBuffer;
+  logBuffer = [];
+  return logs;
 }
 
-function checkProperty(results, key, val) {
-  if( val ) {
-    assert.property(results, key, `has a ${key} property`);
-    assert.isNotNull(results[key], `has content in ${key}`);
-    assert.equal(results[key], val, `${key} is correct`);
-  }
+function shouldSucceed(func, start, mutation, resultsTest) {
+  describe('# Should Succeed', function () {
+    func(start, (x, cb) => cb(null, mutation(x)), (err, results) => {
+      assert.isNull(err);
+      resultsTest(results);
+    });
+  });
 }
 
-function hasOutput(results, stdout, stderr) {
-  checkProperty(results, 'stdout', stdout);
-  checkProperty(results, 'stderr', stderr);
+function shouldError(func, start, mutation, resultsTest) {
+  const errorString = getTestString();
+  describe('# Should Fail', function () {
+    func(start, (x, cb) => cb(errorString, mutation(x)), (err, results) => {
+      assert.isNotNull(err);
+      assert.equal(err, errorString);
+      resultsTest(results);
+    });
+  });
 }
 
-let Dockerode;
-let container;
+function shouldThrow(func, start, expectedError) {
+  describe('# Should Throw', function () {
+    assert.throws(function () {
+      func(start, () => {throw new Error(expectedError);}, () => assert.fail(0, 1, 'should not reach this code.'));
+    }, Error, expectedError);
+  });
+}
+
+function fullTestFunction(funcName, testObject, mutation, expectedTest, errorTest) {
+  const func = async[funcName];
+  shouldSucceed(func, testObject, mutation, expectedTest);
+  console.log(JSON.stringify(getLogs(), null, '\t'));
+  shouldError(func, testObject, mutation, errorTest);
+  console.log(JSON.stringify(getLogs(), null, '\t'));
+  shouldThrow(func, testObject, mutation);
+  console.log(JSON.stringify(getLogs(), null, '\t'));
+}
+
 describe('Basic', function () {
-  let d;
-  step('Object Creation', function () {
+  let a;
+  describe('Object Creation', function () {
     assert.doesNotThrow(function () {
-      d = new SimpleDockerode();
+      a = visibleasync(() => {});
     }, Error);
-    assert.instanceOf(d, SimpleDockerode);
+  });
+
+  describe('Function Wrapping', function () {
+    Object.keys(functionConfigs).forEach(funcName => {
+      assert.property(a, funcName, `has ${funcName}`);
+      assert.isNotNull(a[funcName], `has content in ${funcName}`);
+      assert.isFunction(a[funcName], `${funcName} is a function`);
+    });
   });
 });
 
-describe('Usage', function () {
-  Dockerode = new SimpleDockerode();
-  const testContainerName = 'simple-dockerode-test';
+async = visibleasync(logFunction);
+describe('Iterator Functions', function () {
+  const testArray = Array.from(Array(getRand(10)), getTestString);
 
-  describe('Normal Dockerode', function () {
-    step('pull an alpine image', function (done) {
-      this.timeout(10000);
-      Dockerode.pull('alpine:latest', (err, stream) => {
-        if( err ) { done(err); return; }
-        // stream.pipe(process.stdout);
+  describe('Concat', function () {
+    // Create three entries for every entry, which are the originals with 1, 2, 3 added in.
+    const mutation = (x) => ['1', '2', '3'].map(y => x + y);
 
-        // Must consume stream's data or it won't exit.
-        stream.on('data', () => {});
-        stream.on('end', done);
-      });
-    });
+    const expectedResults = testArray.reduce((acc, x) => acc.concat(mutation(x)), []);
+    const expectedTest = (results) => assert.includeMembers(results, expectedResults);
 
-    step('start an alpine container', function (done) {
-      Dockerode.createContainer({Image: 'alpine:latest', Cmd: ['tail', '-f', '/dev/null'], name: testContainerName}, function (err, c) {
-        if( err ) { done(err); return; }
-        if( c == null ) { done(new Error('Container was null!')); return; }
-        if( !('start' in c) ) { done(new Error('Container did not have start function!')); return; }
+    const errorResults = mutation(testArray[0]);
+    const errorTest = (results) => assert.includeMembers(results, errorResults);
 
-        container = c;
-        container.start(done);
-      });
-    });
+    fullTestFunction('concat', testArray, mutation, expectedTest, errorTest);
+    fullTestFunction('concatSeries', testArray, mutation, expectedTest, errorTest);
   });
 
-  describe('Output Only', function () {
-    step('get stdout, callback', function (done) {
-      this.timeout(10000);
-      const testString = getTestString();
-      container.exec(['echo', '-n', testString], {stdout: true}, (err, results) => {
-        if( err ) { done(err); return; }
-        checkResults(results);
-        hasOutput(results, testString);
-        done();
-      });
-    });
-    step('get stdout, promise', function (done) {
-      this.timeout(10000);
-      const testString = getTestString();
-      container.exec(['echo', '-n', testString], {stdout: true}).catch(done).then(results => {
-        checkResults(results);
-        hasOutput(results, testString);
-        done();
-      });
-    });
+  describe('Detect', function () {
+    // Create three entries for every entry, which are the originals with 1, 2, 3 added in.
+    const mutation = (x) => ['1', '2', '3'].map(y => x + y);
 
-    step('get stderr, callback', function (done) {
-      this.timeout(10000);
-      const testString = getTestString();
-      container.exec(['sh', '-c', `echo -n ${testString} >&2`], {stderr: true}, (err, results) => {
-        if( err ) { done(err); return; }
-        checkResults(results);
-        hasOutput(results, null, testString);
-        done();
-      });
-    });
-    step('get stderr, promise', function (done) {
-      this.timeout(10000);
-      const testString = getTestString();
-      container.exec(['sh', '-c', `echo -n ${testString} >&2`], {stderr: true}).catch(done).then(results => {
-        checkResults(results);
-        hasOutput(results, null, testString);
-        done();
-      });
-    });
+    const expectedResults = testArray.reduce((acc, x) => acc.concat(mutation(x)), []);
+    const expectedTest = (results) => assert.includeMembers(results, expectedResults);
 
-    step('get stdout and stderr, callback', function (done) {
-      this.timeout(10000);
-      const testString = getTestString();
-      const errorString = nonce + Math.floor(Math.random() * rand);
-      container.exec(['sh', '-c', `echo -n ${errorString} >&2 | echo -n ${testString}`], {stdout: true, stderr: true}, (err, results) => {
-        if( err ) { done(err); return; }
-        checkResults(results);
-        hasOutput(results, testString, errorString);
-        done();
-      });
-    });
-    step('get stdout and stderr, promise', function (done) {
-      this.timeout(10000);
-      const testString = getTestString();
-      const errorString = nonce + Math.floor(Math.random() * rand);
-      container.exec(['sh', '-c', `echo -n ${errorString} >&2 | echo -n ${testString}`], {stdout: true, stderr: true}).catch(done).then(results => {
-        checkResults(results);
-        hasOutput(results, testString, errorString);
-        done();
-      });
-    });
+    const errorResults = mutation(testArray[0]);
+    const errorTest = (results) => assert.includeMembers(results, errorResults);
+
+    fullTestFunction('detect', testArray, mutation, expectedTest, errorTest);
+    fullTestFunction('detectLimit', testArray, mutation, expectedTest, errorTest);
+    fullTestFunction('detectSeries', testArray, mutation, expectedTest, errorTest);
   });
 
-  describe('Input Only', function () {
-    step('send an input string, callback', function (done) {
-      this.timeout(10000);
-      const testString = getTestString();
-      container.exec(['tee', '/tmp/test'], {stdin: testString}, (err, results) => {
-        if( err ) { done(err); return; }
-        checkResults(results);
+  describe('Each', function () {
+    // Create three entries for every entry, which are the originals with 1, 2, 3 added in.
+    const mutation = (x) => ['1', '2', '3'].map(y => x + y);
 
-        container.exec(['cat', '/tmp/test'], {stdout: true}, (e, r) => {
-          if( e != null ) { done(e); return; }
-          checkResults(r);
-          hasOutput(r, testString);
-          done();
-        });
-      });
-    });
-    step('send an input string, promise', function (done) {
-      this.timeout(10000);
-      const testString = getTestString();
-      container.exec(['tee', '/tmp/test'], {stdin: testString}).catch(done).then(results => {
-        checkResults(results);
-        return Promise.resolve();
-      }).then(() => container.exec(['cat', '/tmp/test'], {stdout: true})).catch(done).then(results => {
-        checkResults(results);
-        hasOutput(results, testString);
-        done();
-      });
-    });
+    const expectedResults = testArray.reduce((acc, x) => acc.concat(mutation(x)), []);
+    const expectedTest = (results) => assert.includeMembers(results, expectedResults);
 
-    step('send an input stream, callback', function (done) {
-      this.timeout(10000);
-      const testString = getTestString();
+    const errorResults = mutation(testArray[0]);
+    const errorTest = (results) => assert.includeMembers(results, errorResults);
 
-      // Set up a Stream
-      const sender = new Stream.Readable();
-      sender.push(testString);
-      sender.push(null);
-
-      container.exec(['tee', '/tmp/test'], {stdin: sender}, (err, results) => {
-        if( err ) { done(err); return; }
-        checkResults(results);
-
-        container.exec(['cat', '/tmp/test'], {stdout: true}, (e, r) => {
-          if( e != null ) { done(e); return; }
-          checkResults(r);
-          hasOutput(r, testString);
-          done();
-        });
-      });
-    });
-    step('send an input stream, promise', function (done) {
-      this.timeout(10000);
-      const testString = getTestString();
-
-      // Set up a Stream
-      const sender = new Stream.Readable();
-      sender.push(testString);
-      sender.push(null);
-
-      container.exec(['tee', '/tmp/test'], {stdin: sender}).catch(done).then(results => {
-        checkResults(results);
-        return Promise.resolve();
-      }).then(() => container.exec(['cat', '/tmp/test'], {stdout: true})).catch(done).then(results => {
-        checkResults(results);
-        hasOutput(results, testString);
-        done();
-      });
-    });
+    fullTestFunction('each', testArray, mutation, expectedTest, errorTest);
+    fullTestFunction('eachLimit', testArray, mutation, expectedTest, errorTest);
+    fullTestFunction('eachSeries', testArray, mutation, expectedTest, errorTest);
   });
 
-  describe('Input And Output', function () {
-    step('send an input string and hear it back, callback', function (done) {
-      this.timeout(10000);
-      const testString = getTestString();
-      container.exec(['tee'], {stdin: testString, stdout: true}, (err, results) => {
-        if( err ) { done(err); return; }
-        checkResults(results);
-        hasOutput(results, testString);
-        done();
-      });
-    });
-    step('send an input string and hear it back, promise', function (done) {
-      this.timeout(10000);
-      const testString = getTestString();
-      container.exec(['tee'], {stdin: testString, stdout: true}).catch(done).then((results) => {
-        checkResults(results);
-        hasOutput(results, testString);
-        done();
-      });
-    });
+  describe('Each Of', function () {
+    // Create three entries for every entry, which are the originals with 1, 2, 3 added in.
+    const mutation = (x) => ['1', '2', '3'].map(y => x + y);
 
-    step('send an input stream and hear it back, callback', function (done) {
-      this.timeout(10000);
-      const testString = getTestString();
+    const expectedResults = testArray.reduce((acc, x) => acc.concat(mutation(x)), []);
+    const expectedTest = (results) => assert.includeMembers(results, expectedResults);
 
-      // Set up a Stream
-      const sender = new Stream.Readable();
-      sender.push(testString);
-      sender.push(null);
+    const errorResults = mutation(testArray[0]);
+    const errorTest = (results) => assert.includeMembers(results, errorResults);
 
-      container.exec(['tee'], {stdin: sender, stdout: true}, (err, results) => {
-        if( err ) { done(err); return; }
-        checkResults(results);
-        hasOutput(results, testString);
-        done();
-      });
-    });
-    step('send an input stream and hear it back, promise', function (done) {
-      this.timeout(10000);
-      const testString = getTestString();
-
-      // Set up a Stream
-      const sender = new Stream.Readable();
-      sender.push(testString);
-      sender.push(null);
-
-      container.exec(['tee'], {stdin: sender, stdout: true}).catch(done).then((results) => {
-        checkResults(results);
-        hasOutput(results, testString);
-        done();
-      });
-    });
+    fullTestFunction('eachOf', testArray, mutation, expectedTest, errorTest);
+    fullTestFunction('eachOfLimit', testArray, mutation, expectedTest, errorTest);
+    fullTestFunction('eachOfSeries', testArray, mutation, expectedTest, errorTest);
   });
 
-  describe('Detached I/O', function () {
-    step('detached exec into the container, callback, no options', function (done) {
-      this.timeout(10000);
-      const testString = getTestString();
+  describe('Every', function () {
+    // Create three entries for every entry, which are the originals with 1, 2, 3 added in.
+    const mutation = (x) => ['1', '2', '3'].map(y => x + y);
 
-      container.exec(['echo', testString], (err, results) => {
-        if( err ) { done(err); return; }
-        checkResults(results);
-        assert.notProperty(results, 'stdout');
-        assert.notProperty(results, 'stderr');
-        done();
-      });
-    });
-    step('detached exec into the container, promise, no options', function (done) {
-      this.timeout(10000);
-      const testString = getTestString();
+    const expectedResults = testArray.reduce((acc, x) => acc.concat(mutation(x)), []);
+    const expectedTest = (results) => assert.includeMembers(results, expectedResults);
 
-      container.exec(['echo', testString]).then((results) => {
-        checkResults(results);
-        assert.notProperty(results, 'stdout');
-        assert.notProperty(results, 'stderr');
-        done();
-      });
-    });
-    step('detached exec into the container, callback, blank options', function (done) {
-      this.timeout(10000);
-      const testString = getTestString();
+    const errorResults = mutation(testArray[0]);
+    const errorTest = (results) => assert.includeMembers(results, errorResults);
 
-      container.exec(['echo', testString], {}, (err, results) => {
-        if( err ) { done(err); return; }
-        checkResults(results);
-        assert.notProperty(results, 'stdout');
-        assert.notProperty(results, 'stderr');
-        done();
-      });
-    });
-    step('detached exec into the container, promise, blank options', function (done) {
-      this.timeout(10000);
-      const testString = getTestString();
-
-      container.exec(['echo', testString], {}).then((results) => {
-        checkResults(results);
-        assert.notProperty(results, 'stdout');
-        assert.notProperty(results, 'stderr');
-        done();
-      });
-    });
+    fullTestFunction('every', testArray, mutation, expectedTest, errorTest);
+    fullTestFunction('everyLimit', testArray, mutation, expectedTest, errorTest);
+    fullTestFunction('everySeries', testArray, mutation, expectedTest, errorTest);
   });
 
-  describe('Output Only, Live', function () {
-    step('fail bad arguments', function (done) {
-      this.timeout(10000);
-      container.exec(['echo'], {live: true}, err => {
-        assert.instanceOf(err, Error, 'correctly identified invalid arguments');
-        done();
-      });
-    });
+  describe('Filter', function () {
+    // Create three entries for every entry, which are the originals with 1, 2, 3 added in.
+    const mutation = (x) => ['1', '2', '3'].map(y => x + y);
 
-    step('get stdout, callback', function (done) {
-      this.timeout(10000);
-      const testString = getTestString();
+    const expectedResults = testArray.reduce((acc, x) => acc.concat(mutation(x)), []);
+    const expectedTest = (results) => assert.includeMembers(results, expectedResults);
 
-      container.exec(['echo', '-n', testString], {live: true, stdout: true}, (err, hose) => {
-        if( err ) { done(err); return; }
-        const battery = new StreamBattery(['stdout', 'stderr'], (battError, battResults) => {
-          if( battError ) { done(battError); }
-          hasOutput(battResults, testString);
-          done();
-        });
-        hose(...battery.streams).on('end', () => battery.end());
-      });
-    });
-    step('get stdout, promise', function (done) {
-      this.timeout(10000);
-      const testString = getTestString();
+    const errorResults = mutation(testArray[0]);
+    const errorTest = (results) => assert.includeMembers(results, errorResults);
 
-      container.exec(['echo', '-n', testString], {live: true, stdout: true}).catch(done).then(hose => {
-        const battery = new StreamBattery(['stdout', 'stderr'], (battError, battResults) => {
-          if( battError ) { done(battError); }
-          hasOutput(battResults, testString);
-          done();
-        });
-        hose(...battery.streams).on('end', () => battery.end());
-      });
-    });
-
-    step('get stderr, callback', function (done) {
-      this.timeout(10000);
-      const testString = getTestString();
-      container.exec(['sh', '-c', `echo -n ${testString} >&2`], {live: true, stderr: true}, (err, hose) => {
-        if( err ) { done(err); return; }
-        const battery = new StreamBattery(['stdout', 'stderr'], (battError, battResults) => {
-          if( battError ) { done(battError); }
-          hasOutput(battResults, null, testString);
-          done();
-        });
-        hose(...battery.streams).on('end', () => battery.end());
-      });
-    });
-    step('get stderr, promise', function (done) {
-      this.timeout(10000);
-      const testString = getTestString();
-      container.exec(['sh', '-c', `echo -n ${testString} >&2`], {live: true, stderr: true}).catch(done).then(hose => {
-        const battery = new StreamBattery(['stdout', 'stderr'], (battError, battResults) => {
-          if( battError ) { done(battError); }
-          hasOutput(battResults, null, testString);
-          done();
-        });
-        hose(...battery.streams).on('end', () => battery.end());
-      });
-    });
-
-    step('get stdout and stderr, callback', function (done) {
-      this.timeout(10000);
-      const testString = getTestString();
-      const errorString = nonce + Math.floor(Math.random() * rand);
-      container.exec(['sh', '-c', `echo -n ${errorString} >&2 | echo -n ${testString}`], {live: true, stdout: true, stderr: true}, (err, hose) => {
-        if( err ) { done(err); return; }
-        const battery = new StreamBattery(['stdout', 'stderr'], (battError, battResults) => {
-          if( battError ) { done(battError); }
-          hasOutput(battResults, testString, errorString);
-          done();
-        });
-        hose(...battery.streams).on('end', () => battery.end());
-      });
-    });
-    step('get stdout and stderr, promise', function (done) {
-      this.timeout(10000);
-      const testString = getTestString();
-      const errorString = nonce + Math.floor(Math.random() * rand);
-      container.exec(['sh', '-c', `echo -n ${errorString} >&2 | echo -n ${testString}`], {live: true, stdout: true, stderr: true}).catch(done).then(hose => {
-        const battery = new StreamBattery(['stdout', 'stderr'], (battError, battResults) => {
-          if( battError ) { done(battError); }
-          hasOutput(battResults, testString, errorString);
-          done();
-        });
-        hose(...battery.streams).on('end', () => battery.end());
-      });
-    });
+    fullTestFunction('filter', testArray, mutation, expectedTest, errorTest);
+    fullTestFunction('filterLimit', testArray, mutation, expectedTest, errorTest);
+    fullTestFunction('filterSeries', testArray, mutation, expectedTest, errorTest);
   });
 
-  describe('Input Only, Live', function () {
-    step('send an input stream, callback', function (done) {
-      this.timeout(10000);
-      const testString = getTestString();
+  describe('Group By', function () {
+    // Create three entries for every entry, which are the originals with 1, 2, 3 added in.
+    const mutation = (x) => ['1', '2', '3'].map(y => x + y);
 
-      // Set up a Stream
-      const sender = new Stream.Readable();
-      sender.push(testString);
-      sender.push(null);
+    const expectedResults = testArray.reduce((acc, x) => acc.concat(mutation(x)), []);
+    const expectedTest = (results) => assert.includeMembers(results, expectedResults);
 
-      container.exec(['tee', '/tmp/test'], {live: true, stdin: true}, (err, hose) => {
-        if( err ) { done(err); return; }
-        sender.pipe(hose());
+    const errorResults = mutation(testArray[0]);
+    const errorTest = (results) => assert.includeMembers(results, errorResults);
 
-        container.exec(['cat', '/tmp/test'], {stdout: true}, (e, r) => {
-          if( e != null ) { done(e); return; }
-          checkResults(r);
-          hasOutput(r, testString);
-          done();
-        });
-      });
-    });
-    step('send an input stream, promise', function (done) {
-      this.timeout(10000);
-      const testString = getTestString();
-
-      // Set up a Stream
-      const sender = new Stream.Readable();
-      sender.push(testString);
-      sender.push(null);
-
-      container.exec(['tee', '/tmp/test'], {live: true, stdin: true}).catch(done).then(hose => {
-        const stream = hose();
-        sender.pipe(stream);
-        return new Promise(resolve => {
-          stream.on('end', resolve);
-        });
-      }).then(() => container.exec(['cat', '/tmp/test'], {stdout: true})).catch(done).then(results => {
-        checkResults(results);
-        hasOutput(results, testString);
-        done();
-      });
-    });
+    fullTestFunction('groupBy', testArray, mutation, expectedTest, errorTest);
+    fullTestFunction('groupByLimit', testArray, mutation, expectedTest, errorTest);
+    fullTestFunction('groupBySeries', testArray, mutation, expectedTest, errorTest);
   });
 
-  describe('Input And Output, Live', function () {
-    step('send an input stream and hear it back, callback', function (done) {
-      this.timeout(10000);
-      const testString = getTestString();
+  describe('Map', function () {
+    // Create three entries for every entry, which are the originals with 1, 2, 3 added in.
+    const mutation = (x) => ['1', '2', '3'].map(y => x + y);
 
-      // Set up a Stream
-      const sender = new Stream.Readable();
-      sender.push(testString);
-      sender.push(null);
+    const expectedResults = testArray.reduce((acc, x) => acc.concat(mutation(x)), []);
+    const expectedTest = (results) => assert.includeMembers(results, expectedResults);
 
-      container.exec(['tee'], {live: true, stdin: true, stdout: true}, (err, hose) => {
-        if( err ) { done(err); return; }
-        const battery = new StreamBattery(['stdout', 'stderr'], (battError, battResults) => {
-          if( battError ) { done(battError); }
-          hasOutput(battResults, testString);
-          done();
-        });
-        const stream = hose(...battery.streams);
-        sender.pipe(stream);
-        stream.on('end', () => battery.end());
-      });
-    });
-    step('send an input stream and hear it back, promise', function (done) {
-      this.timeout(10000);
-      const testString = getTestString();
+    const errorResults = mutation(testArray[0]);
+    const errorTest = (results) => assert.includeMembers(results, errorResults);
 
-      // Set up a Stream
-      const sender = new Stream.Readable();
-      sender.push(testString);
-      sender.push(null);
-
-      container.exec(['tee'], {live: true, stdin: true, stdout: true}).catch(done).then(hose => {
-        const battery = new StreamBattery(['stdout', 'stderr'], (battError, battResults) => {
-          if( battError ) { done(battError); }
-          hasOutput(battResults, testString);
-          done();
-        });
-        const stream = hose(...battery.streams);
-        sender.pipe(stream);
-        stream.on('end', () => battery.end());
-      });
-    });
+    fullTestFunction('map', testArray, mutation, expectedTest, errorTest);
+    fullTestFunction('mapLimit', testArray, mutation, expectedTest, errorTest);
+    fullTestFunction('mapSeries', testArray, mutation, expectedTest, errorTest);
   });
 
-  afterEach(function () {
-    if( hasFailed(this) ) {
-      if( container != null ) {
-        container.stop(err => {
-          if( err != null ) { throw new Error(err); }
-          container.remove(e => {
-            if( e != null ) { throw new Error(e); }
-          });
-        });
-      }
-    }
+  describe('Map Values', function () {
+    // Create three entries for every entry, which are the originals with 1, 2, 3 added in.
+    const mutation = (x) => ['1', '2', '3'].map(y => x + y);
+
+    const expectedResults = testArray.reduce((acc, x) => acc.concat(mutation(x)), []);
+    const expectedTest = (results) => assert.includeMembers(results, expectedResults);
+
+    const errorResults = mutation(testArray[0]);
+    const errorTest = (results) => assert.includeMembers(results, errorResults);
+
+    fullTestFunction('mapValues', testArray, mutation, expectedTest, errorTest);
+    fullTestFunction('mapValuesLimit', testArray, mutation, expectedTest, errorTest);
+    fullTestFunction('mapValuesSeries', testArray, mutation, expectedTest, errorTest);
+  });
+
+  describe('Reduce', function () {
+    // Create three entries for every entry, which are the originals with 1, 2, 3 added in.
+    const mutation = (x) => ['1', '2', '3'].map(y => x + y);
+
+    const expectedResults = testArray.reduce((acc, x) => acc.concat(mutation(x)), []);
+    const expectedTest = (results) => assert.includeMembers(results, expectedResults);
+
+    const errorResults = mutation(testArray[0]);
+    const errorTest = (results) => assert.includeMembers(results, errorResults);
+
+    fullTestFunction('reduce', testArray, mutation, expectedTest, errorTest);
+  });
+
+  describe('Reduce Right', function () {
+    // Create three entries for every entry, which are the originals with 1, 2, 3 added in.
+    const mutation = (x) => ['1', '2', '3'].map(y => x + y);
+
+    const expectedResults = testArray.reduce((acc, x) => acc.concat(mutation(x)), []);
+    const expectedTest = (results) => assert.includeMembers(results, expectedResults);
+
+    const errorResults = mutation(testArray[0]);
+    const errorTest = (results) => assert.includeMembers(results, errorResults);
+
+    fullTestFunction('reduceRight', testArray, mutation, expectedTest, errorTest);
+  });
+
+  describe('Reject', function () {
+    // Create three entries for every entry, which are the originals with 1, 2, 3 added in.
+    const mutation = (x) => ['1', '2', '3'].map(y => x + y);
+
+    const expectedResults = testArray.reduce((acc, x) => acc.concat(mutation(x)), []);
+    const expectedTest = (results) => assert.includeMembers(results, expectedResults);
+
+    const errorResults = mutation(testArray[0]);
+    const errorTest = (results) => assert.includeMembers(results, errorResults);
+
+    fullTestFunction('reject', testArray, mutation, expectedTest, errorTest);
+    fullTestFunction('rejectLimit', testArray, mutation, expectedTest, errorTest);
+    fullTestFunction('rejectSeries', testArray, mutation, expectedTest, errorTest);
+  });
+
+  describe('Some', function () {
+    // Create three entries for every entry, which are the originals with 1, 2, 3 added in.
+    const mutation = (x) => ['1', '2', '3'].map(y => x + y);
+
+    const expectedResults = testArray.reduce((acc, x) => acc.concat(mutation(x)), []);
+    const expectedTest = (results) => assert.includeMembers(results, expectedResults);
+
+    const errorResults = mutation(testArray[0]);
+    const errorTest = (results) => assert.includeMembers(results, errorResults);
+
+    fullTestFunction('some', testArray, mutation, expectedTest, errorTest);
+    fullTestFunction('someLimit', testArray, mutation, expectedTest, errorTest);
+    fullTestFunction('someSeries', testArray, mutation, expectedTest, errorTest);
+  });
+
+  describe('Sort By', function () {
+    // Create three entries for every entry, which are the originals with 1, 2, 3 added in.
+    const mutation = (x) => ['1', '2', '3'].map(y => x + y);
+
+    const expectedResults = testArray.reduce((acc, x) => acc.concat(mutation(x)), []);
+    const expectedTest = (results) => assert.includeMembers(results, expectedResults);
+
+    const errorResults = mutation(testArray[0]);
+    const errorTest = (results) => assert.includeMembers(results, errorResults);
+
+    fullTestFunction('sortBy', testArray, mutation, expectedTest, errorTest);
+  });
+
+  describe('Transform', function () {
+    // Create three entries for every entry, which are the originals with 1, 2, 3 added in.
+    const mutation = (x) => ['1', '2', '3'].map(y => x + y);
+
+    const expectedResults = testArray.reduce((acc, x) => acc.concat(mutation(x)), []);
+    const expectedTest = (results) => assert.includeMembers(results, expectedResults);
+
+    const errorResults = mutation(testArray[0]);
+    const errorTest = (results) => assert.includeMembers(results, errorResults);
+
+    fullTestFunction('transform', testArray, mutation, expectedTest, errorTest);
   });
 });
 
-describe('Cleanup', function () {
-  step('kill container', function (done) {
-    if( container != null ) {
-      this.timeout(10000);
-      container.kill(done);
-    }
-  });
+describe('Control Flow Functions', function () {
+  describe('Auto', function () {
+    // Create three entries for every entry, which are the originals with 1, 2, 3 added in.
+    const mutation = (x) => ['1', '2', '3'].map(y => x + y);
 
-  step('remove container', function (done) {
-    if( container != null ) {
-      this.timeout(10000);
-      container.remove(done);
-    }
+    const expectedResults = testArray.reduce((acc, x) => acc.concat(mutation(x)), []);
+    const expectedTest = (results) => assert.includeMembers(results, expectedResults);
+
+    const errorResults = mutation(testArray[0]);
+    const errorTest = (results) => assert.includeMembers(results, errorResults);
+
+    fullTestFunction('auto', testArray, mutation, expectedTest, errorTest);
+    fullTestFunction('autoInject', testArray, mutation, expectedTest, errorTest);
   });
 });
+
+//       // Control flow functions
+//       // applyEach
+//       // applyEachSeries
+//       auto: autoTasks,
+//       autoInject: autoTasks,
+//       cargo: worker,
+//       // 'compose'
+//       doDuring: doLoop,
+//       doUntil: doLoop,
+//       doWhilst: doLoop,
+//       during: loop,
+//       forever: forever,
+//       parallel: taskList,
+//       parallelLimit: taskList,
+//       priorityQueue: worker,
+//       queue: worker,
+//       race: taskList,
+//       retry: retry,
+//       retryable: retry,
+//       // seq
+//       series: taskList,
+//       times: times,
+//       timesLimit: times,
+//       timesSeries: times,
+//       until: loop,
+//       waterfall: taskList,
+//       whilst: loop
+//     };
