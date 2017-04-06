@@ -3,8 +3,10 @@ const assert = require('chai').assert;
 const visibleasync = require('../lib/index.js');
 
 const functionConfigs = require('../lib/functionConfigs.js');
-const functionSignatures = require('../lib/functionSignatures.js');
+
+const multiSymbol = Symbol('multipleArgs');
 /* eslint-disable max-nested-callbacks */
+/* eslint-disable max-depth */
 
 let async;
 
@@ -28,42 +30,172 @@ function getLogs() {
   return logs;
 }
 
-function shouldSucceed(func, start, mutation, resultsTest) {
-  describe('# Should Succeed', function () {
-    func(start, (x, cb) => cb(null, mutation(x)), (err, results) => {
-      assert.isNull(err);
-      resultsTest(results);
+function findPermutations(obj) {
+  // If an argument type has multiple possibilities, it will return a function.
+  // With those functions, we generate additional argument sets.
+  let perms = {};
+
+  // Find the permutors and get their permutations.
+  Object.keys(obj).forEach(key => {
+    if( 'multiSymbol' in obj[key] && obj[key].multiSymbol === multiSymbol ) {
+      perms[key] = obj[key];
+      delete obj[key];
+      delete perms[key].multiSymbol;
+    }
+  });
+
+  if( Object.keys(perms).length === 0 ) {
+    return [obj];
+  }
+
+  const permute = (keys) => {
+    const key = keys.shift();
+    const mySet = perms[key].map(p => ({[key]: p}));
+
+    if( keys.length === 0 ) {
+      return mySet;
+    }
+
+    const myResults = [];
+    permute(keys).forEach(set => mySet.forEach(mine => myResults.push(Object.assign({}, mine, set))));
+    return myResults;
+  };
+
+  return permute(Object.keys(perms)).map(subSet => Object.assign(subSet, obj));
+}
+
+function createAllTests(funcName, providedParts, providedFuncs) {
+  let tests = [];
+  functionConfigs[funcName].forEach(sig => {
+    let argSet = Object.assign({}, providedParts);
+
+    // Provide a default if the argument type doesn't exist in our parts.
+    sig.wrap.forEach(argType => {
+      if( !(argType in argSet) ) {
+        if( /^(autoTasks|tasks|collection)$/.test(argType) ) {
+          // We can just use a common name for all these "object of the function" types.
+          if( 'object' in argSet ) {
+            argSet[argType] = argSet.object; return;
+          } else if( 'collection' in argSet ) {
+            argSet[argType] = argSet.collection; return;
+          }
+          throw new Error('Required argument type not specified: ' + argType);
+        } else if ( /^iteratee\w*$/.test(argType) ) {
+          // If we have a special iteratee, we can also use the plain name for it.
+          if( !('mutate' in argSet) ) {
+            throw new Error('Mutator required');
+          }
+          argSet[argType] = [
+            (...args) => {const cb = args.pop(); cb(null, argSet.mutate(args));},
+            (...args) => {const cb = args.pop(); cb(argSet.mutate(args));},
+            () => {console.log('I am a problem function')}
+          ];
+          argSet[argType].multiSymbol = multiSymbol;
+          return;
+        }
+
+        let replacement;
+        switch(argType) {
+        default: throw new Error('Required argument type: ' + argType);
+
+        // Memo isn't easily replaced. Just let the iteratee specify.
+        case 'memo': replacement = null; break;
+
+        // Generate multiple tests for each possible retryOption.
+        case 'retryOptions': replacement = [1, 5, {}, {times: 1, interval: 0}, {times: 5, interval: 0}, {times: 1, interval: 100}, {times: 5, interval: 100}]; replacement.multiSymbol = multiSymbol; break;
+
+        // Generate a couple of limit cases.
+        case 'limit': replacement = [1, 5, getRand(10) + 1, getRand(10) + 1, getRand(10) + 1]; replacement.multiSymbol = multiSymbol; break;
+
+        // Generate a couple of timesCount cases.
+        case 'timesCount': replacement = [1, 5, getRand(10) + 1, getRand(10) + 1, getRand(10) + 1]; replacement.multiSymbol = multiSymbol; break;
+
+        // Fill in several callbacks for each type of test.
+        case 'callback':
+          if( !('successCallback' in argSet) ) {
+            if( !('successTest' in argSet) ) {
+              throw new Error('No successCallback specified, and no successTest given.');
+            }
+
+            argSet.successCallback = (err, results) => {
+              assert.isNull(err);
+              argSet.successTest(results);
+            };
+          }
+
+          if( !('errorCallback' in argSet) ) {
+            if( !('errorTest' in argSet) ) {
+              throw new Error('No errorCallback specified, and no errorTest given.');
+            }
+
+            argSet.errorCallback = (err, results) => {
+              assert.isNotNull(err);
+              if( 'errorString' in argSet ) {
+                assert.equal(err, argSet.errorString);
+              }
+              argSet.errorTest(results);
+            };
+          }
+
+          if( !('throwCallback' in argSet) ) {
+            argSet.throwCallback = () => assert.fail(0, 1, 'should not reach this code.');
+          }
+          break;
+        }
+
+        if( replacement ) {
+          argSet[argType] = replacement;
+        }
+      }
+    });
+
+    tests = tests.concat(findPermutations(argSet));
+  });
+
+  return tests;
+}
+
+function fullTestFunction(funcName, parts, funcs) {
+  // Get all of our argument sets
+  const argSets = createAllTests(funcName, parts, funcs);
+  console.log(`Running ${argSets.length} tests for ${funcName}`);
+  let i = 1;
+
+  argSets.forEach(argSet => {
+    const func = async[funcName];
+    functionConfigs[funcName].forEach(sig => {
+      const args = [];
+      let hasCallback = false;
+      sig.wrap.forEach(argType => {
+        if( argType !== 'callback' ) {
+          if( !(argType in argSet) ) {
+            console.error(argType, argSet);
+            throw new Error('No ' + argType + ' in argSet despite going through createAllTests');
+          }
+          args.push(argSet[argType]);
+        } else {
+          hasCallback = true;
+        }
+      });
+
+      if( hasCallback ) {
+        // Provide a generic callback that we'll use to determine whether we should test success or failure.
+        describe(`# ${funcName} ${i}/${argSets.length}`, function () {
+          console.log(...args, console.log );
+          func(...args, console.log);
+          console.log(JSON.stringify(getLogs(), null, '\t'));
+        });
+      } else {
+        describe(`# ${funcName} ${i}/${argSets.length}`, function () {
+          console.log(...args);
+          func(...args);
+          console.log(JSON.stringify(getLogs(), null, '\t'));
+        });
+      }
+
+      i++;
     });
   });
-}
-
-function shouldError(func, start, mutation, resultsTest) {
-  const errorString = getTestString();
-  describe('# Should Fail', function () {
-    func(start, (x, cb) => cb(errorString, mutation(x)), (err, results) => {
-      assert.isNotNull(err);
-      assert.equal(err, errorString);
-      resultsTest(results);
-    });
-  });
-}
-
-function shouldThrow(func, start, expectedError) {
-  describe('# Should Throw', function () {
-    assert.throws(function () {
-      func(start, () => {throw new Error(expectedError);}, () => assert.fail(0, 1, 'should not reach this code.'));
-    }, Error, expectedError);
-  });
-}
-
-function fullTestFunction(funcName, testObject, mutation, expectedTest, errorTest) {
-  const func = async[funcName];
-  shouldSucceed(func, testObject, mutation, expectedTest);
-  console.log(JSON.stringify(getLogs(), null, '\t'));
-  shouldError(func, testObject, mutation, errorTest);
-  console.log(JSON.stringify(getLogs(), null, '\t'));
-  shouldThrow(func, testObject, mutation);
-  console.log(JSON.stringify(getLogs(), null, '\t'));
 }
 
 describe('Basic', function () {
@@ -89,234 +221,227 @@ describe('Iterator Functions', function () {
 
   describe('Concat', function () {
     // Create three entries for every entry, which are the originals with 1, 2, 3 added in.
-    const mutation = (x) => ['1', '2', '3'].map(y => x + y);
+    const mutate = x => ['1', '2', '3'].map(y => x + y);
 
-    const expectedResults = testArray.reduce((acc, x) => acc.concat(mutation(x)), []);
-    const expectedTest = (results) => assert.includeMembers(results, expectedResults);
+    const successResults = testArray.reduce((acc, x) => acc.concat(mutate(x)), []);
+    const successTest = results => assert.includeMembers(results, successResults);
 
-    const errorResults = mutation(testArray[0]);
-    const errorTest = (results) => assert.includeMembers(results, errorResults);
+    const errorResults = mutate(testArray[0]);
+    const errorTest = results => assert.includeMembers(results, errorResults);
 
-    fullTestFunction('concat', testArray, mutation, expectedTest, errorTest);
-    fullTestFunction('concatSeries', testArray, mutation, expectedTest, errorTest);
+    fullTestFunction('concat', {object: testArray, mutate, successTest, errorTest});
+    fullTestFunction('concatSeries', {object: testArray, mutate, successTest, errorTest});
   });
 
   describe('Detect', function () {
-    // Create three entries for every entry, which are the originals with 1, 2, 3 added in.
-    const mutation = (x) => ['1', '2', '3'].map(y => x + y);
+    // Pick a random one and let's try to find it.
+    const successResults = testArray[Math.floor(Math.random() * testArray.length)];
+    const iteratee = x => x === successResults;
 
-    const expectedResults = testArray.reduce((acc, x) => acc.concat(mutation(x)), []);
-    const expectedTest = (results) => assert.includeMembers(results, expectedResults);
+    const successTest = results => assert.equal(results, successResults);
 
-    const errorResults = mutation(testArray[0]);
-    const errorTest = (results) => assert.includeMembers(results, errorResults);
+    const errorTest = results => assert.isUndefined(results);
 
-    fullTestFunction('detect', testArray, mutation, expectedTest, errorTest);
-    fullTestFunction('detectLimit', testArray, mutation, expectedTest, errorTest);
-    fullTestFunction('detectSeries', testArray, mutation, expectedTest, errorTest);
+    fullTestFunction('detect', {object: testArray, iteratee, successTest, errorTest});
+    fullTestFunction('detectLimit', {object: testArray, iteratee, successTest, errorTest});
+    fullTestFunction('detectSeries', {object: testArray, iteratee, successTest, errorTest});
   });
-
+  return;
   describe('Each', function () {
-    // Create three entries for every entry, which are the originals with 1, 2, 3 added in.
-    const mutation = (x) => ['1', '2', '3'].map(y => x + y);
+    // Doesn't matter what we do here.
+    const iteratee = x => x + 1;
 
-    const expectedResults = testArray.reduce((acc, x) => acc.concat(mutation(x)), []);
-    const expectedTest = (results) => assert.includeMembers(results, expectedResults);
+    const successTest = results => assert.isUndefined(results);
 
-    const errorResults = mutation(testArray[0]);
-    const errorTest = (results) => assert.includeMembers(results, errorResults);
+    const errorTest = results => assert.isUndefined(results);
 
-    fullTestFunction('each', testArray, mutation, expectedTest, errorTest);
-    fullTestFunction('eachLimit', testArray, mutation, expectedTest, errorTest);
-    fullTestFunction('eachSeries', testArray, mutation, expectedTest, errorTest);
+    fullTestFunction('each', {object: testArray, iteratee, successTest, errorTest});
+    fullTestFunction('eachLimit', {object: testArray, iteratee, successTest, errorTest});
+    fullTestFunction('eachSeries', {object: testArray, iteratee, successTest, errorTest});
   });
 
   describe('Each Of', function () {
-    // Create three entries for every entry, which are the originals with 1, 2, 3 added in.
-    const mutation = (x) => ['1', '2', '3'].map(y => x + y);
+    // Doesn't matter what we do here.
+    const iteratee = x => x + 1;
 
-    const expectedResults = testArray.reduce((acc, x) => acc.concat(mutation(x)), []);
-    const expectedTest = (results) => assert.includeMembers(results, expectedResults);
+    const successTest = results => assert.isUndefined(results);
 
-    const errorResults = mutation(testArray[0]);
-    const errorTest = (results) => assert.includeMembers(results, errorResults);
+    const errorTest = results => assert.isUndefined(results);
 
-    fullTestFunction('eachOf', testArray, mutation, expectedTest, errorTest);
-    fullTestFunction('eachOfLimit', testArray, mutation, expectedTest, errorTest);
-    fullTestFunction('eachOfSeries', testArray, mutation, expectedTest, errorTest);
+    fullTestFunction('eachOf', {object: testArray, iteratee, successTest, errorTest});
+    fullTestFunction('eachOfLimit', {object: testArray, iteratee, successTest, errorTest});
+    fullTestFunction('eachOfSeries', {object: testArray, iteratee, successTest, errorTest});
   });
 
   describe('Every', function () {
-    // Create three entries for every entry, which are the originals with 1, 2, 3 added in.
-    const mutation = (x) => ['1', '2', '3'].map(y => x + y);
+    // Check that everything is not null.
+    const iteratee = x => x !== null;
 
-    const expectedResults = testArray.reduce((acc, x) => acc.concat(mutation(x)), []);
-    const expectedTest = (results) => assert.includeMembers(results, expectedResults);
+    const successTest = results => assert.equal(results, true);
 
-    const errorResults = mutation(testArray[0]);
-    const errorTest = (results) => assert.includeMembers(results, errorResults);
+    const errorTest = results => assert.equal(results, false);
 
-    fullTestFunction('every', testArray, mutation, expectedTest, errorTest);
-    fullTestFunction('everyLimit', testArray, mutation, expectedTest, errorTest);
-    fullTestFunction('everySeries', testArray, mutation, expectedTest, errorTest);
+    fullTestFunction('every', {object: testArray, iteratee, successTest, errorTest});
+    fullTestFunction('everyLimit', {object: testArray, iteratee, successTest, errorTest});
+    fullTestFunction('everySeries', {object: testArray, iteratee, successTest, errorTest});
   });
 
   describe('Filter', function () {
-    // Create three entries for every entry, which are the originals with 1, 2, 3 added in.
-    const mutation = (x) => ['1', '2', '3'].map(y => x + y);
+    // Find everything that has a 5 in it.
+    const iteratee = x => /5/.test(x);
 
-    const expectedResults = testArray.reduce((acc, x) => acc.concat(mutation(x)), []);
-    const expectedTest = (results) => assert.includeMembers(results, expectedResults);
+    const successResults = testArray.filter(iteratee);
+    const successTest = results => assert.includeMembers(results, successResults);
 
-    const errorResults = mutation(testArray[0]);
-    const errorTest = (results) => assert.includeMembers(results, errorResults);
+    const errorResults = iteratee(testArray[0]);
+    const errorTest = results => assert.includeMembers(results, errorResults);
 
-    fullTestFunction('filter', testArray, mutation, expectedTest, errorTest);
-    fullTestFunction('filterLimit', testArray, mutation, expectedTest, errorTest);
-    fullTestFunction('filterSeries', testArray, mutation, expectedTest, errorTest);
+    fullTestFunction('filter', {object: testArray, iteratee, successTest, errorTest});
+    fullTestFunction('filterLimit', {object: testArray, iteratee, successTest, errorTest});
+    fullTestFunction('filterSeries', {object: testArray, iteratee, successTest, errorTest});
   });
-
+  return;
   describe('Group By', function () {
     // Create three entries for every entry, which are the originals with 1, 2, 3 added in.
-    const mutation = (x) => ['1', '2', '3'].map(y => x + y);
+    const iteratee = x => ['1', '2', '3'].map(y => x + y);
 
-    const expectedResults = testArray.reduce((acc, x) => acc.concat(mutation(x)), []);
-    const expectedTest = (results) => assert.includeMembers(results, expectedResults);
+    const successResults = testArray.reduce((acc, x) => acc.concat(iteratee(x)), []);
+    const successTest = results => assert.includeMembers(results, successResults);
 
-    const errorResults = mutation(testArray[0]);
-    const errorTest = (results) => assert.includeMembers(results, errorResults);
+    const errorResults = iteratee(testArray[0]);
+    const errorTest = results => assert.includeMembers(results, errorResults);
 
-    fullTestFunction('groupBy', testArray, mutation, expectedTest, errorTest);
-    fullTestFunction('groupByLimit', testArray, mutation, expectedTest, errorTest);
-    fullTestFunction('groupBySeries', testArray, mutation, expectedTest, errorTest);
+    fullTestFunction('groupBy', {object: testArray, iteratee, successTest, errorTest});
+    fullTestFunction('groupByLimit', {object: testArray, iteratee, successTest, errorTest});
+    fullTestFunction('groupBySeries', {object: testArray, iteratee, successTest, errorTest});
   });
 
   describe('Map', function () {
     // Create three entries for every entry, which are the originals with 1, 2, 3 added in.
-    const mutation = (x) => ['1', '2', '3'].map(y => x + y);
+    const iteratee = x => ['1', '2', '3'].map(y => x + y);
 
-    const expectedResults = testArray.reduce((acc, x) => acc.concat(mutation(x)), []);
-    const expectedTest = (results) => assert.includeMembers(results, expectedResults);
+    const successResults = testArray.reduce((acc, x) => acc.concat(iteratee(x)), []);
+    const successTest = results => assert.includeMembers(results, successResults);
 
-    const errorResults = mutation(testArray[0]);
-    const errorTest = (results) => assert.includeMembers(results, errorResults);
+    const errorResults = iteratee(testArray[0]);
+    const errorTest = results => assert.includeMembers(results, errorResults);
 
-    fullTestFunction('map', testArray, mutation, expectedTest, errorTest);
-    fullTestFunction('mapLimit', testArray, mutation, expectedTest, errorTest);
-    fullTestFunction('mapSeries', testArray, mutation, expectedTest, errorTest);
+    fullTestFunction('map', {object: testArray, iteratee, successTest, errorTest});
+    fullTestFunction('mapLimit', {object: testArray, iteratee, successTest, errorTest});
+    fullTestFunction('mapSeries', {object: testArray, iteratee, successTest, errorTest});
   });
 
   describe('Map Values', function () {
     // Create three entries for every entry, which are the originals with 1, 2, 3 added in.
-    const mutation = (x) => ['1', '2', '3'].map(y => x + y);
+    const iteratee = x => ['1', '2', '3'].map(y => x + y);
 
-    const expectedResults = testArray.reduce((acc, x) => acc.concat(mutation(x)), []);
-    const expectedTest = (results) => assert.includeMembers(results, expectedResults);
+    const successResults = testArray.reduce((acc, x) => acc.concat(iteratee(x)), []);
+    const successTest = results => assert.includeMembers(results, successResults);
 
-    const errorResults = mutation(testArray[0]);
-    const errorTest = (results) => assert.includeMembers(results, errorResults);
+    const errorResults = iteratee(testArray[0]);
+    const errorTest = results => assert.includeMembers(results, errorResults);
 
-    fullTestFunction('mapValues', testArray, mutation, expectedTest, errorTest);
-    fullTestFunction('mapValuesLimit', testArray, mutation, expectedTest, errorTest);
-    fullTestFunction('mapValuesSeries', testArray, mutation, expectedTest, errorTest);
+    fullTestFunction('mapValues', {object: testArray, iteratee, successTest, errorTest});
+    fullTestFunction('mapValuesLimit', {object: testArray, iteratee, successTest, errorTest});
+    fullTestFunction('mapValuesSeries', {object: testArray, iteratee, successTest, errorTest});
   });
 
   describe('Reduce', function () {
     // Create three entries for every entry, which are the originals with 1, 2, 3 added in.
-    const mutation = (x) => ['1', '2', '3'].map(y => x + y);
+    const iteratee = x => ['1', '2', '3'].map(y => x + y);
 
-    const expectedResults = testArray.reduce((acc, x) => acc.concat(mutation(x)), []);
-    const expectedTest = (results) => assert.includeMembers(results, expectedResults);
+    const successResults = testArray.reduce((acc, x) => acc.concat(iteratee(x)), []);
+    const successTest = results => assert.includeMembers(results, successResults);
 
-    const errorResults = mutation(testArray[0]);
-    const errorTest = (results) => assert.includeMembers(results, errorResults);
+    const errorResults = iteratee(testArray[0]);
+    const errorTest = results => assert.includeMembers(results, errorResults);
 
-    fullTestFunction('reduce', testArray, mutation, expectedTest, errorTest);
+    fullTestFunction('reduce', {object: testArray, iteratee, successTest, errorTest});
   });
 
   describe('Reduce Right', function () {
     // Create three entries for every entry, which are the originals with 1, 2, 3 added in.
-    const mutation = (x) => ['1', '2', '3'].map(y => x + y);
+    const iteratee = x => ['1', '2', '3'].map(y => x + y);
 
-    const expectedResults = testArray.reduce((acc, x) => acc.concat(mutation(x)), []);
-    const expectedTest = (results) => assert.includeMembers(results, expectedResults);
+    const successResults = testArray.reduce((acc, x) => acc.concat(iteratee(x)), []);
+    const successTest = results => assert.includeMembers(results, successResults);
 
-    const errorResults = mutation(testArray[0]);
-    const errorTest = (results) => assert.includeMembers(results, errorResults);
+    const errorResults = iteratee(testArray[0]);
+    const errorTest = results => assert.includeMembers(results, errorResults);
 
-    fullTestFunction('reduceRight', testArray, mutation, expectedTest, errorTest);
+    fullTestFunction('reduceRight', {object: testArray, iteratee, successTest, errorTest});
   });
 
   describe('Reject', function () {
     // Create three entries for every entry, which are the originals with 1, 2, 3 added in.
-    const mutation = (x) => ['1', '2', '3'].map(y => x + y);
+    const iteratee = x => ['1', '2', '3'].map(y => x + y);
 
-    const expectedResults = testArray.reduce((acc, x) => acc.concat(mutation(x)), []);
-    const expectedTest = (results) => assert.includeMembers(results, expectedResults);
+    const successResults = testArray.reduce((acc, x) => acc.concat(iteratee(x)), []);
+    const successTest = results => assert.includeMembers(results, successResults);
 
-    const errorResults = mutation(testArray[0]);
-    const errorTest = (results) => assert.includeMembers(results, errorResults);
+    const errorResults = iteratee(testArray[0]);
+    const errorTest = results => assert.includeMembers(results, errorResults);
 
-    fullTestFunction('reject', testArray, mutation, expectedTest, errorTest);
-    fullTestFunction('rejectLimit', testArray, mutation, expectedTest, errorTest);
-    fullTestFunction('rejectSeries', testArray, mutation, expectedTest, errorTest);
+    fullTestFunction('reject', {object: testArray, iteratee, successTest, errorTest});
+    fullTestFunction('rejectLimit', {object: testArray, iteratee, successTest, errorTest});
+    fullTestFunction('rejectSeries', {object: testArray, iteratee, successTest, errorTest});
   });
 
   describe('Some', function () {
     // Create three entries for every entry, which are the originals with 1, 2, 3 added in.
-    const mutation = (x) => ['1', '2', '3'].map(y => x + y);
+    const iteratee = x => ['1', '2', '3'].map(y => x + y);
 
-    const expectedResults = testArray.reduce((acc, x) => acc.concat(mutation(x)), []);
-    const expectedTest = (results) => assert.includeMembers(results, expectedResults);
+    const successResults = testArray.reduce((acc, x) => acc.concat(iteratee(x)), []);
+    const successTest = results => assert.includeMembers(results, successResults);
 
-    const errorResults = mutation(testArray[0]);
-    const errorTest = (results) => assert.includeMembers(results, errorResults);
+    const errorResults = iteratee(testArray[0]);
+    const errorTest = results => assert.includeMembers(results, errorResults);
 
-    fullTestFunction('some', testArray, mutation, expectedTest, errorTest);
-    fullTestFunction('someLimit', testArray, mutation, expectedTest, errorTest);
-    fullTestFunction('someSeries', testArray, mutation, expectedTest, errorTest);
+    fullTestFunction('some', {object: testArray, iteratee, successTest, errorTest});
+    fullTestFunction('someLimit', {object: testArray, iteratee, successTest, errorTest});
+    fullTestFunction('someSeries', {object: testArray, iteratee, successTest, errorTest});
   });
 
   describe('Sort By', function () {
     // Create three entries for every entry, which are the originals with 1, 2, 3 added in.
-    const mutation = (x) => ['1', '2', '3'].map(y => x + y);
+    const iteratee = x => ['1', '2', '3'].map(y => x + y);
 
-    const expectedResults = testArray.reduce((acc, x) => acc.concat(mutation(x)), []);
-    const expectedTest = (results) => assert.includeMembers(results, expectedResults);
+    const successResults = testArray.reduce((acc, x) => acc.concat(iteratee(x)), []);
+    const successTest = results => assert.includeMembers(results, successResults);
 
-    const errorResults = mutation(testArray[0]);
-    const errorTest = (results) => assert.includeMembers(results, errorResults);
+    const errorResults = iteratee(testArray[0]);
+    const errorTest = results => assert.includeMembers(results, errorResults);
 
-    fullTestFunction('sortBy', testArray, mutation, expectedTest, errorTest);
+    fullTestFunction('sortBy', {object: testArray, iteratee, successTest, errorTest});
   });
 
   describe('Transform', function () {
     // Create three entries for every entry, which are the originals with 1, 2, 3 added in.
-    const mutation = (x) => ['1', '2', '3'].map(y => x + y);
+    const iteratee = x => ['1', '2', '3'].map(y => x + y);
 
-    const expectedResults = testArray.reduce((acc, x) => acc.concat(mutation(x)), []);
-    const expectedTest = (results) => assert.includeMembers(results, expectedResults);
+    const successResults = testArray.reduce((acc, x) => acc.concat(iteratee(x)), []);
+    const successTest = results => assert.includeMembers(results, successResults);
 
-    const errorResults = mutation(testArray[0]);
-    const errorTest = (results) => assert.includeMembers(results, errorResults);
+    const errorResults = iteratee(testArray[0]);
+    const errorTest = results => assert.includeMembers(results, errorResults);
 
-    fullTestFunction('transform', testArray, mutation, expectedTest, errorTest);
+    fullTestFunction('transform', {object: testArray, iteratee, successTest, errorTest});
   });
 });
 
 describe('Control Flow Functions', function () {
   describe('Auto', function () {
     // Create three entries for every entry, which are the originals with 1, 2, 3 added in.
-    const mutation = (x) => ['1', '2', '3'].map(y => x + y);
+    const iteratee = x => ['1', '2', '3'].map(y => x + y);
 
-    const expectedResults = testArray.reduce((acc, x) => acc.concat(mutation(x)), []);
-    const expectedTest = (results) => assert.includeMembers(results, expectedResults);
+    const successResults = testArray.reduce((acc, x) => acc.concat(iteratee(x)), []);
+    const successTest = results => assert.includeMembers(results, successResults);
 
-    const errorResults = mutation(testArray[0]);
-    const errorTest = (results) => assert.includeMembers(results, errorResults);
+    const errorResults = iteratee(testArray[0]);
+    const errorTest = results => assert.includeMembers(results, errorResults);
 
-    fullTestFunction('auto', testArray, mutation, expectedTest, errorTest);
-    fullTestFunction('autoInject', testArray, mutation, expectedTest, errorTest);
+    fullTestFunction('auto', {object: testArray, iteratee, successTest, errorTest});
+    fullTestFunction('autoInject', {object: testArray, iteratee, successTest, errorTest});
   });
 });
 
